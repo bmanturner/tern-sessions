@@ -1,0 +1,45 @@
+> deploy auth
+  words: [deploy] [auth]
+  repo:   model: 
+  after: nil  before: nil  cost: nil..nil
+  errors: 
+  fts: "deploy"* AND "auth"*
+> "exact phrase" repo:web model:opus
+  words: [exact phrase]
+  repo: [web]  model: [opus]
+  after: nil  before: nil  cost: nil..nil
+  errors: 
+  fts: "exact phrase"*
+> after:2026-10-01 before:bad cost>$5.5 cost<x
+  words: 
+  repo:   model: 
+  after: 2026-10-01  before: nil  cost: 5.5..nil
+  errors: [before: needs a date like 2026-10-01] [cost: needs a number like cost>5]
+  fts: nil
+> it's 100%_done
+  words: [it's] [100%_done]
+  repo:   model: 
+  after: nil  before: nil  cost: nil..nil
+  errors: 
+  fts: "it's"* AND "100%_done"*
+> " OR *
+  words: [OR *]
+  repo:   model: 
+  after: nil  before: nil  cost: nil..nil
+  errors: 
+  fts: "OR *"*
+> REPO:Api Model:GPT cost<12
+  words: 
+  repo: [Api]  model: [GPT]
+  after: nil  before: nil  cost: nil..12
+  errors: 
+  fts: nil
+quote doubled: true
+percent escaped: true
+underscore escaped: true
+no -bail: true
+detail bad id: nil
+detail injection: nil
+mark: «Deploy» docs; next «deploy».
+mark none: nothing here
+mark overlap: «abc»«abc»

@@ -1,0 +1,13 @@
+schema = 1
+id = "tern-sessions"
+name = "Agent Sessions"
+version = "0.1.0"
+description = "Search, resume and fork past omp sessions, and see what they cost."
+icon = "history"
+host = "host.luau"
+window = "window.luau"
+styles = ["manager.css"]
+
+[[blocks]]
+id = "manager"
+title = "Agent Sessions"

@@ -1,0 +1,9 @@
+{
+	"private": true,
+	"scripts": {
+		"test": "bun test/check.ts && bun test/sql.ts"
+	},
+	"devDependencies": {
+		"luau-web": "*"
+	}
+}
