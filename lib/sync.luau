@@ -34,21 +34,21 @@ function sync.run(force: boolean, cb: (string?) -> ())
 	running = true
 	bins.resolve(function(b)
 		if b == nil then
-			return finish("omp wasn't found, so spend may be out of date.")
+			return finish("omp isn't on your PATH, so these totals may be out of date.")
 		end
 		local function done(r: ProcessResult)
 			if r.status == 0 and not r.timed_out then
 				last_ok = tern.now()
 				return finish(nil)
 			end
-			finish("omp stats failed, so spend may be out of date.")
+			finish("Couldn't refresh from omp, so these totals may be out of date.")
 		end
 		local ok = pcall(function()
 			tern.process.run({ b.omp, "stats", "--summary" }, { timeout_ms = 30000 }, done)
 		end)
 		if not ok then
 			bins.invalidate()
-			finish("omp stats failed, so spend may be out of date.")
+			finish("Couldn't refresh from omp, so these totals may be out of date.")
 		end
 	end)
 end

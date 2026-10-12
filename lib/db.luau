@@ -37,30 +37,85 @@ function db.has_stats(): boolean
 	return exists(db.paths().stats)
 end
 
--- cb(value) with the decoded last line, cb(nil) when the query printed no row, cb(nil, message) on failure.
-function db.run(sql: string, cb: (any?, string?) -> ())
+function db.has_history(): boolean
+	return exists(db.paths().history)
+end
+
+export type DbError = {
+	kind: "no_sqlite" | "no_history" | "busy" | "timeout" | "failed",
+	message: string,
+	detail: string?,
+}
+
+local MESSAGES = {
+	no_sqlite = "SQLite isn't installed, so omp's history can't be read.",
+	no_history = "Run omp once and your sessions will appear here.",
+	busy = "omp is busy writing its database. Try again in a moment.",
+	timeout = "omp's database took too long to answer.",
+	failed = "Couldn't read omp's database.",
+}
+
+local function fail(kind: "no_sqlite" | "no_history" | "busy" | "timeout" | "failed", detail: string?): DbError
+	return { kind = kind, message = MESSAGES[kind], detail = detail }
+end
+
+type Entry = { sql: string, cb: (any?, DbError?) -> (), tag: string? }
+
+-- One sqlite3 process at a time: omp itself writes these files, so concurrent readers only invite
+-- lock errors. The next entry starts from the previous entry's callback.
+local queue: { Entry } = {}
+local running = false
+
+local pump: () -> ()
+
+-- Runs one entry (attempt 1 or its single retry) and calls `done` exactly once.
+local function execute(entry: Entry, attempt: number, done: (any?, DbError?) -> ())
 	local sqlite = db.sqlite()
 	if sqlite == nil then
-		return cb(nil, "sqlite3 isn't installed. Install it (e.g. sudo apt install sqlite3) and reopen.")
+		return done(nil, fail("no_sqlite"))
 	end
 	local paths = db.paths()
 	if not exists(paths.history) then
-		return cb(nil, "No omp history yet: " .. paths.history .. " doesn't exist.")
+		return done(nil, fail("no_history", paths.history))
 	end
 	-- Never -bail: with it sqlite3 prints nothing at all.
-	local argv = { sqlite, "-readonly", "-noheader", "-list" }
+	local argv = { sqlite, "-readonly", "-noheader", "-list", "-cmd", ".timeout 4000" }
 	if exists(paths.stats) then
 		table.insert(argv, "-cmd")
 		table.insert(argv, "attach " .. query.lit(paths.stats) .. " as s")
 	end
 	table.insert(argv, paths.history)
-	table.insert(argv, sql)
-	local function done(r: ProcessResult)
+	table.insert(argv, entry.sql)
+	local function finished(r: ProcessResult)
 		if r.timed_out then
-			return cb(nil, "The query took too long.")
-		elseif r.status ~= 0 then
-			local line = tostring(r.stderr):match("[^\r\n]+") or ("sqlite3 failed (status " .. tostring(r.status) .. ")")
-			return cb(nil, line:sub(1, 200))
+			return done(nil, fail("timeout"))
+		end
+		if r.status ~= 0 then
+			local stderr = tostring(r.stderr)
+			local lower = stderr:lower()
+			local locked = lower:find("locked", 1, true) ~= nil or lower:find("busy", 1, true) ~= nil
+			if locked and attempt == 1 then
+				tern.log.warn("tern-sessions: sqlite3 busy, retrying", stderr)
+				local okt = pcall(function()
+					tern.timer(400, function()
+						execute(entry, 2, done)
+					end)
+				end)
+				if okt then
+					return
+				end
+			end
+			tern.log.warn("tern-sessions: sqlite3 failed", stderr)
+			if locked then
+				return done(nil, fail("busy"))
+			end
+			local line = stderr:match("[^\r\n]+")
+			if line == nil then
+				line = "sqlite3 exited with status " .. tostring(r.status)
+			else
+				line = (line :: string):gsub("^Error in %d+%a* command line argument: ", "")
+			end
+			return done(nil, fail("failed", (line :: string):sub(1, 200)))
 		end
 		local last: string? = nil
 		for line in tostring(r.stdout):gmatch("[^\r\n]+") do
@@ -69,22 +124,57 @@ function db.run(sql: string, cb: (any?, string?) -> ())
 			end
 		end
 		if last == nil then
-			return cb(nil, nil)
+			return done(nil, nil)
 		end
 		local okd, value = pcall(function()
 			return tern.json.decode(last :: string)
 		end)
 		if not okd then
-			return cb(nil, "Unexpected output from sqlite3.")
+			return done(nil, fail("failed", "unexpected output"))
 		end
-		cb(value, nil)
+		done(value, nil)
 	end
 	local ok = pcall(function()
-		tern.process.run(argv, { timeout_ms = 15000 }, done)
+		tern.process.run(argv, { timeout_ms = 15000 }, finished)
 	end)
 	if not ok then
-		cb(nil, "sqlite3 couldn't start.")
+		done(nil, fail("failed", "sqlite3 couldn't start"))
 	end
+end
+
+function pump()
+	if running then
+		return
+	end
+	local entry = table.remove(queue, 1)
+	if entry == nil then
+		return
+	end
+	running = true
+	execute(entry, 1, function(value, err)
+		running = false
+		local ok, e = pcall(function()
+			entry.cb(value, err)
+		end)
+		if not ok then
+			tern.log.error("tern-sessions: db callback failed", e)
+		end
+		pump()
+	end)
+end
+
+-- cb(value) with the decoded last line, cb(nil) when the query printed no row, cb(nil, err) on failure.
+-- A queued call with the same non-nil `tag` is replaced; its callback never runs.
+function db.run(sql: string, cb: (any?, DbError?) -> (), tag: string?)
+	if tag ~= nil then
+		for i = #queue, 1, -1 do
+			if queue[i].tag == tag then
+				table.remove(queue, i)
+			end
+		end
+	end
+	table.insert(queue, { sql = sql, cb = cb, tag = tag })
+	pump()
 end
 
 return db

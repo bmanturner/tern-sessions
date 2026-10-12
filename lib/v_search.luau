@@ -24,6 +24,7 @@ end
 
 function S.run(state: State)
 	state.seq += 1
+	state.debounce += 1 -- a pending debounce timer would only repeat this search
 	local my = state.seq
 	state.searching = true
 	local parsed = query.parse(state.q.text)
@@ -33,6 +34,7 @@ function S.run(state: State)
 			return
 		end
 		state.searching = false
+		state.pending = false
 		if err ~= nil then
 			state.err = err
 			state.results = nil
@@ -42,8 +44,21 @@ function S.run(state: State)
 		end
 		local n = if state.results then #(state.results :: { any }) else 0
 		state.sel_idx = math.clamp(state.sel_idx, 1, math.max(1, n))
+		local queued = state.after
+		state.after = nil
+		if queued ~= nil then
+			S.act(state, queued)
+		end
+		U.refocus(state)
 		U.render(state)
-	end)
+	end, "search")
+end
+
+-- The query text changed: results are stale until the next run lands.
+local function stale(state: State)
+	state.pending = true
+	state.after = nil
+	state.sel_idx = 1
 end
 
 -- Runs the search once typing pauses.
@@ -70,20 +85,32 @@ local function filtered(p: any): boolean
 		and (#p.words > 0 or #p.repo > 0 or #p.model > 0 or p.after ~= nil or p.before ~= nil or p.cost_min ~= nil or p.cost_max ~= nil)
 end
 
--- The header shared by the search and spend views: title, tab badges, a status.
-function S.header(state: State, status: string): Node
-	local ui = tern.ui
-	local on = if state.mode == "spend" then "spend" else "search"
-	return U.with(
-		ui.row({
-			U.text({ ui.span("Agent Sessions", "strong") }, "title"),
-			U.badge("Search", if on == "search" then "accent" else "neutral", "tab", "t-search", "search"),
-			U.badge("Spend", if on == "spend" then "accent" else "neutral", "tab", "t-spend", "spend"),
-			U.text({ ui.span(status, "muted") }, "status"),
-		}),
-		{ key = "header", gap = "sm" }
-	)
+-- The `repo:` token for the hint folder: its last two path segments (`acme/web`) when both
+-- are space-free, else the longest space-free part of its name.
+local function folder_token(state: State): string?
+	local cwd = state.cwd_hint
+	if type(cwd) ~= "string" then
+		return nil
+	end
+	local parent, base = cwd:match("([^/]+)/([^/]+)/*$")
+	if parent ~= nil and base ~= nil and not parent:find("%s") and not base:find("%s") then
+		return "repo:" .. parent .. "/" .. base
+	end
+	local name = cwd:match("([^/]+)/*$")
+	if name == nil then
+		return nil
+	end
+	local best = ""
+	for part in name:gmatch("%S+") do
+		if #part > #best then
+			best = part
+		end
+	end
+	return "repo:" .. best
 end
+
+local HIT_ICON = { title = "type", recap = "note", prompt = "message" }
+local HIT_NAME = { title = "title", recap = "recap", prompt = "prompt" }
 
 local function item(r: any, words: { string }, now: number, tier: number): Node
 	local ui = tern.ui
@@ -106,18 +133,57 @@ local function item(r: any, words: { string }, now: number, tier: number): Node
 		detail = { ui.span(table.concat(parts, " · "), "muted") }
 	end
 	local started = num(r.started)
-	local value = if started then U.when_text(started, now) else ""
-	if num(r.cost) then
-		value ..= " · " .. U.cost_text(r.cost)
+	local when = if started then U.when_text(started, now) else ""
+	local value: string
+	if num(r.cost) and (tier < 3 or when == "") then
+		value = U.cost_text(r.cost)
+	elseif num(r.cost) then
+		value = when .. " · " .. U.cost_text(r.cost)
+	else
+		value = when
 	end
+	local label = if r.hit == "title" then U.snippet_spans(U.mark(title, words), "strong") else { ui.span(title, "strong") }
+	local aria: { string } = { title }
+	if str(r.cwd) then
+		table.insert(aria, U.tilde(r.cwd))
+	end
+	if value ~= "" then
+		table.insert(aria, value)
+	end
+	local hit = if type(r.hit) == "string" then r.hit else nil
 	return ui.node("item", {
 		key = r.id,
-		label = { ui.span(title, "strong") },
+		label = label,
 		detail = if tier >= 2 then detail else nil,
 		value = { ui.span(value, "muted") },
-		icon = if r.hit == "prompt" then "message" elseif r.hit == "recap" then "note" else "history",
-		aria = title,
+		icon = if hit then HIT_ICON[hit] else nil,
+		title = if hit then "Matched in " .. HIT_NAME[hit] else nil,
+		tone = "muted",
+		aria = table.concat(aria, ", "),
 	})
+end
+
+local function count_text(results: { any }?): string?
+	if results == nil or #results == 0 then
+		return nil
+	elseif #results >= LIMIT then
+		return LIMIT .. "+ sessions"
+	end
+	return string.format("%d session%s", #results, if #results == 1 then "" else "s")
+end
+
+-- Input decorations for the filter tokens of the text as it is now.
+local function decor(text: string): { any }
+	local out: { any } = {}
+	local live: any = query.parse(text)
+	for _, t in live.tokens do
+		table.insert(out, {
+			from = U.utf16_at(text, t.from),
+			to = U.utf16_at(text, t.to + 1),
+			s = if t.kind == "invalid" then "warning typo" else "accent",
+		})
+	end
+	return out
 end
 
 function S.view(state: State): (Node, Node)
@@ -125,34 +191,34 @@ function S.view(state: State): (Node, Node)
 	local now = os.time()
 	local tier = U.tier(state.cx.cols)
 	local results = state.results
-	local status = if results then string.format("%d session%s", #results, if #results == 1 then "" else "s") else ""
-	if state.searching then
-		status ..= (if status ~= "" then " · " else "") .. "searching…"
-	end
-	local children: { Node } = { S.header(state, status) }
+	local children: { Node } = {
+		U.header(state, {
+			count = count_text(results),
+			busy = if state.pending or state.searching then "Searching…" else nil,
+		}),
+	}
 	table.insert(
 		children,
 		ui.node("input", {
 			key = "query",
 			text = state.q.text,
 			cursor = textfield.utf16(state.q),
-			placeholder = "Search sessions: words, repo:app, model:opus, after:2026-10-01, cost>5",
+			decor = decor(state.q.text),
+			placeholder = "Search sessions, or try repo:web model:opus cost>5",
 			prompt = { ui.span("/ ", "muted") },
+			aria = "Search sessions",
 		})
 	)
 	local p: any = state.parsed
 	if type(p) == "table" and #p.errors > 0 then
-		table.insert(children, U.text({ ui.span(table.concat(p.errors, " · "), "warning") }, "perr"))
+		table.insert(children, U.text({ ui.span("⚠ " .. table.concat(p.errors, " · "), "warning") }, "perr"))
 	end
+	local has_filter = filtered(p)
 	if state.err ~= nil then
-		table.insert(children, cards.error("Search failed", state.err :: string))
+		table.insert(children, U.error_card(state.err :: any, "retry"))
 	elseif results ~= nil then
-		if #results == 0 then
-			if filtered(p) then
-				table.insert(children, U.text({ ui.span("No sessions match.", "muted") }, "none"))
-			else
-				table.insert(children, cards.empty("No omp sessions yet", "Sessions appear here after you use omp."))
-			end
+		if #results == 0 and not has_filter then
+			table.insert(children, cards.empty("No omp sessions yet", "Sessions appear here after you use omp."))
 		else
 			local items: { Node } = {}
 			local words: { string } = if type(p) == "table" then p.words else {}
@@ -162,19 +228,27 @@ function S.view(state: State): (Node, Node)
 			local sel = S.selected(state)
 			table.insert(
 				children,
-				ui.node("list", { key = "results", selected = if sel then U.item_id("results", sel.id) else nil }, items)
+				ui.node("list", {
+					key = "results",
+					selected = if sel then U.item_id("results", sel.id) else nil,
+					max = 0.68,
+					empty = {
+						ui.span(
+							"No sessions match “" .. U.trim(state.q.text) .. "”. Try fewer words, or remove a filter.",
+							"muted"
+						),
+					},
+				}, items)
 			)
 			if #results >= LIMIT then
-				table.insert(children, U.text({ ui.span("Showing the best 100. Add words or filters to narrow it.", "muted") }, "limit"))
+				table.insert(children, U.text({ ui.span("Showing the first 100. Add words or filters to narrow it.", "muted") }, "limit"))
 			end
 		end
 	end
 
-	local dock: { Node } = {}
 	local sel: any = S.selected(state)
-	if state.notice then
-		table.insert(dock, U.text({ ui.span(state.notice :: string, "muted") }, "notice"))
-	elseif sel ~= nil then
+	local context: Node? = nil
+	if sel ~= nil then
 		local parts: { string } = {}
 		if str(sel.cwd) then
 			table.insert(parts, U.tilde(sel.cwd))
@@ -185,37 +259,51 @@ function S.view(state: State): (Node, Node)
 		if num(sel.started) and num(sel.ended) then
 			table.insert(parts, U.duration_text(sel.ended - sel.started))
 		end
-		table.insert(
-			dock,
-			U.text({ ui.span(D.clip(str(sel.title) or "Untitled session", 80)), ui.span("  " .. table.concat(parts, " · "), "muted") }, "context")
-		)
+		if num(sel.requests) then
+			table.insert(parts, string.format("%d request%s", sel.requests, if sel.requests == 1 then "" else "s"))
+		end
+		context = U.text({ ui.span(table.concat(parts, " · "), "muted") }, "context")
 	end
-	if sel ~= nil then
-		table.insert(
-			dock,
-			U.with(ui.row({ U.badge("Open ⏎", "accent", "open", "b-open"), U.badge("Resume ^R", "neutral", "resume", "b-resume") }), { key = "acts" })
-		)
+	local dock = U.dock(state, {
+		context = context,
+		notice = state.notice,
+		actions = {
+			{ label = "Open", key = "enter", act = "open", primary = true, hidden = sel == nil },
+			{
+				label = if state.launching then "Resuming…" else "Resume",
+				key = "ctrl+r",
+				act = "resume",
+				hidden = sel == nil,
+			},
+			{ label = "This folder", key = "ctrl+f", act = "folder", hidden = folder_token(state) == nil },
+			{ label = "Spend", key = "tab", act = "tab_spend" },
+			{ label = "Clear", key = "escape", act = "clear", hidden = state.q.text == "" },
+		},
+	})
+	return ui.col(children), dock
+end
+
+function S.move(state: State, to: number): boolean
+	local list = state.results
+	if list == nil or #list == 0 then
+		return false
 	end
-	table.insert(dock, U.hints({ { "⏎", "details" }, { "^R", "resume" }, { "^F", "this folder" }, { "⇥", "spend" }, { "esc", "clear" } }))
-	return ui.col(children), ui.col(dock)
+	local i = math.clamp(to, 1, #list)
+	if i == state.sel_idx then
+		return false
+	end
+	state.sel_idx = i
+	state.notice = nil
+	return true
 end
 
 -- Adds or removes `repo:<this folder>` in the query.
 local function toggle_folder(state: State): boolean
-	local cwd = state.cwd_hint
-	local base = if type(cwd) == "string" then cwd:match("([^/]+)/*$") else nil
-	if base == nil then
+	local tok = folder_token(state)
+	if tok == nil then
 		state.notice = "No folder to filter by."
 		return true
 	end
-	-- A token can't hold spaces; the longest space-free part still narrows to that folder.
-	local best = ""
-	for part in base:gmatch("%S+") do
-		if #part > #best then
-			best = part
-		end
-	end
-	local tok = "repo:" .. best
 	local words: { string } = {}
 	local had = false
 	for w in state.q.text:gmatch("%S+") do
@@ -230,62 +318,74 @@ local function toggle_folder(state: State): boolean
 	end
 	textfield.set(state.q, table.concat(words, " ") .. (if had then "" else " "))
 	state.notice = nil
+	stale(state)
 	S.run(state)
 	return true
 end
 
-function S.move(state: State, delta: number): boolean
-	local list = state.results
-	if list == nil or #list == 0 then
-		return false
-	end
-	local i = math.clamp(state.sel_idx + delta, 1, #list)
-	if i == state.sel_idx then
-		return false
-	end
-	state.sel_idx = i
-	return true
-end
-
 function S.act(state: State, act: string): boolean
-	local sel = S.selected(state)
-	if act == "open" then
+	if act == "open" or act == "resume" then
+		if state.pending or state.searching then
+			-- Results are about to change: act on the new row once they land.
+			state.after = act :: "open" | "resume"
+			if state.pending then
+				S.run(state)
+			end
+			return true
+		end
+		local sel = S.selected(state)
 		if sel == nil then
 			return false
 		end
-		D.open(state, sel.id, "search")
-	elseif act == "resume" then
-		if sel == nil then
+		if act == "open" then
+			D.open(state, sel.id, "search")
+		else
+			D.launch(state, sel, "resume")
+		end
+		return true
+	elseif act == "folder" then
+		return toggle_folder(state)
+	elseif act == "clear" then
+		if state.q.text == "" then
 			return false
 		end
-		D.launch(state, sel, "resume")
-	else
-		return false
+		textfield.set(state.q, "")
+		state.notice = nil
+		stale(state)
+		S.run(state)
+		return true
+	elseif act == "retry" then
+		state.err = nil
+		S.run(state)
+		return true
 	end
-	return true
+	return false
 end
 
 function S.key(state: State, k: Key): boolean
 	local name = k.name
 	if name == "up" then
-		return S.move(state, -1)
+		return S.move(state, state.sel_idx - 1)
 	elseif name == "down" then
+		return S.move(state, state.sel_idx + 1)
+	elseif name == "page_up" then
+		return S.move(state, state.sel_idx - 10)
+	elseif name == "page_down" then
+		return S.move(state, state.sel_idx + 10)
+	elseif name == "home" then
 		return S.move(state, 1)
-	elseif name == "pageup" then
-		return S.move(state, -10)
-	elseif name == "pagedown" then
-		return S.move(state, 10)
+	elseif name == "end" then
+		return S.move(state, math.huge)
 	elseif name == "enter" then
 		return S.act(state, "open")
 	elseif name == "escape" then
 		if state.q.text == "" and state.notice == nil then
 			return false
 		end
-		state.notice = nil
 		if state.q.text ~= "" then
-			textfield.set(state.q, "")
-			S.run(state)
+			return S.act(state, "clear")
 		end
+		state.notice = nil
 		return true
 	elseif k.ctrl and name == "r" then
 		return S.act(state, "resume")
@@ -296,7 +396,7 @@ function S.key(state: State, k: Key): boolean
 	end
 	if textfield.key(state.q, k, false) then
 		state.notice = nil
-		state.sel_idx = 1
+		stale(state)
 		S.schedule(state)
 		return true
 	end

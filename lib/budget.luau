@@ -15,10 +15,7 @@ local FIRST_MS = 10000
 local EVERY_MS = 300000
 
 local function alert(today: number, limit: number)
-	local argv = platform.notify_argv(
-		"Agent Sessions",
-		string.format("Today's omp spend is $%.2f, over your $%.2f daily budget.", today, limit)
-	)
+	local argv = platform.notify_argv("Over your daily omp budget", string.format("$%.2f spent today, budget $%.2f.", today, limit))
 	if argv ~= nil then
 		pcall(function()
 			tern.process.run(argv, { timeout_ms = 5000 }, function() end)
@@ -38,7 +35,7 @@ local function check()
 		if not db.has_stats() then
 			return
 		end
-		db.run(query.today_sql(), function(r)
+		db.run(query.today_sql(), function(r, _err)
 			if type(r) ~= "table" or type(r.today) ~= "number" then
 				return
 			end

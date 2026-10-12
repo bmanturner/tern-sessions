@@ -28,18 +28,26 @@ function commands.focused_cwd(cx: WindowCx): (string, string?)
 	return "", nil
 end
 
+-- Opens the manager in `mode`. An open manager already in that mode (detail counts as either) is
+-- focused; one in the other mode is closed and replaced, so there is never a second manager.
 local function open(cx: WindowCx, mode: string)
-	local ok, ids = pcall(function()
+	local ok, entries = pcall(function()
 		return tern.kv.get("managers")
 	end)
-	if ok and type(ids) == "table" then
-		for _, id in ids do
+	if ok and type(entries) == "table" then
+		for _, e in entries do
+			-- Legacy entries were bare pane id strings with no mode.
+			local id = if type(e) == "table" then e.id else e
+			local have = if type(e) == "table" then e.mode else nil
 			local okr, pane = pcall(function()
 				return cx.session:resolve(tostring(id))
 			end)
 			if okr and pane ~= nil then
-				cx.layout:focus(pane)
-				return
+				if have == mode or have == "detail" then
+					cx.layout:focus(pane)
+					return
+				end
+				cx.layout:close(pane)
 			end
 		end
 	end
@@ -66,7 +74,7 @@ function commands.register()
 	})
 	tern.command({
 		id = "spend",
-		title = "Spend",
+		title = "Show spend",
 		icon = "chart",
 		group = GROUP,
 		run = function(cx: WindowCx)

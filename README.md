@@ -1,10 +1,10 @@
 # Agent Sessions _(tern-sessions)_
 
-Search your past [omp](https://github.com/can1357/oh-my-pi) sessions from [Tern](https://stencil.so/tern), reopen one in a new tab, and see what they cost.
+Search your past [omp](https://github.com/can1357/oh-my-pi) sessions from [Tern](https://stencil.so/tern), resume or fork one in a new tab, and see what they cost.
 
 ![Agent Sessions searching for "deploy": sessions whose title matches, then ones where a recap or one of your prompts mentions deploy, each with its folder or the matching text, when it ran and its cost](docs/screenshots/search.png)
 
-Type a few words and Agent Sessions finds the sessions where they appear in the title, a recap, or one of your prompts. Press `ctrl+r` to resume the session in a new tab, in its own folder. The **Spend** tab adds up what omp has cost today, this week and this month, and can warn you when a day goes over budget.
+Type a few words and Agent Sessions finds the sessions where they appear in the title, a recap, or one of your prompts. Press `ctrl+r` to resume the session in a new tab, in its own folder. The **Spend** tab adds up what omp has cost today, this week and this month, and can warn you when a day goes over budget. Costs are estimated API costs from `omp stats`.
 
 It reads omp's own history and stats databases. Nothing is indexed or copied, so results are there as soon as omp writes them.
 
@@ -16,7 +16,7 @@ Needs Tern 0.8 or later on macOS or Linux (not Windows), [omp](https://github.co
 tern plugin install github.com/bmanturner/tern-sessions
 ```
 
-Press `ctrl+alt+shift+h`, or run **Agent Sessions: Search sessions** from the palette. To update, run the install command again with `--force`.
+Press `ctrl+alt+shift+h`, or run **Agent Sessions: Search sessions** from the palette. **Agent Sessions: Show spend** opens the Spend tab. To update, run the install command again with `--force`.
 
 ## Search
 
@@ -29,30 +29,36 @@ Press `ctrl+alt+shift+h`, or run **Agent Sessions: Search sessions** from the pa
 | `after:2026-10-01`, `before:2026-10-08` | Sessions started in that range |
 | `cost>5`, `cost<1` | Sessions that cost more or less than that many dollars |
 
-Title matches come first, then recaps, then prompts. Only your own prompts are searchable; what the agent wrote isn't.
+Title matches come first, then recaps, then prompts. Only your own prompts are searchable; what the agent wrote isn't. Filters are highlighted in the field; an invalid one is underlined and ignored, with a note. If you type and press `enter` right away, it acts on the new results.
 
 | Key | Does |
 | --- | --- |
 | `↑` `↓` | Select a session |
+| `page up` `page down`, `home` `end` | Jump through the list |
 | `enter` | Open its details |
 | `ctrl+r` | Resume it in a new tab |
-| `ctrl+f` | Show only sessions from the folder you opened Agent Sessions in |
+| `ctrl+f` | Show only sessions from this folder |
 | `tab` | Switch to Spend |
 | `esc` | Clear the search |
 
-The details show the session's folder, times, requests, tool calls, models and cost (including its subagents), its recaps and your first 30 prompts. Press `r` to resume it, `f` to fork it into a new session, or `y` to copy its id.
+The details show the session's folder, times, cost (including its subagents), tool calls, session id, file, recaps and your first 30 prompts. Press `enter` or `r` to resume it, `f` to fork it (a copy that continues on its own), `y` to copy its id, or `esc` to go back. The arrows scroll the prompts, and clicking a prompt copies it.
 
-![A session's details: folder, start and end time, duration, requests, tool calls, model, cost and file, then its recap and prompts](docs/screenshots/detail.png)
+![A session's details: folder, start and end time, duration, tool calls, cost and file, then its recap and prompts](docs/screenshots/detail.png)
 
 ## Spend
 
-![The Spend tab: today, this week and this month with a daily budget meter, bars for the last 14 days, costs by project and by model, and the ten costliest sessions of the last 30 days](docs/screenshots/spend.png)
+![The Spend tab: today, this week and this month with a daily budget meter, bars for the last 14 days, costs by folder and by model, and the ten costliest sessions of the last 30 days](docs/screenshots/spend.png)
 
-Spend shows today, this week (from Monday) and this month, a bar per day for the last two weeks, and the costliest projects, models and sessions of the last 30 days. Press `enter` on a session to open it.
+Spend shows today, this week (from Monday) and this month, and a bar per day for the last two weeks (today highlighted, days over budget in amber). Below are costs by folder and by model with a share bar, and the ten costliest sessions of the last 30 days.
 
-Press `b` to set a daily budget. Once a day goes over it, you get one desktop notification and a toast in any open Agent Sessions tab. Tern checks every 5 minutes while its session service is running. Set the budget to 0 to turn this off.
+| Key | Does |
+| --- | --- |
+| `enter` | Open the selected session |
+| `b` | Set the daily budget |
+| `shift+r` | Refresh (runs `omp stats --summary` first) |
+| `tab` `esc` | Back to Search |
 
-Costs are omp's API-equivalent estimates, the same numbers `omp stats` reports. Before showing Spend, Agent Sessions runs `omp stats --summary` (at most once a minute) so the totals are current. Press `shift+r` to refresh.
+The budget dialog has Save and Cancel buttons too. Once a day goes over the budget, you get one desktop notification. Tern checks within 5 minutes (first shortly after it starts) while its session service is running. Set the budget to 0 to turn alerts off.
 
 ## Good to know
 

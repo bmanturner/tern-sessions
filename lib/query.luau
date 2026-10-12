@@ -12,6 +12,7 @@ export type Parsed = {
 	cost_min: number?,
 	cost_max: number?,
 	errors: { string },
+	tokens: { { from: number, to: number, kind: "filter" | "invalid" } },
 }
 
 local query = {}
@@ -45,31 +46,44 @@ function query.fts(words: { string }): string?
 	return table.concat(terms, " AND ")
 end
 
-local function tokens(text: string): { { text: string, quoted: boolean } }
-	local out: { { text: string, quoted: boolean } } = {}
+type Tok = { text: string, quoted: boolean, from: number, to: number }
+
+local function tokens(text: string): { Tok }
+	local out: { Tok } = {}
 	local cur: { string } = {}
 	local quoted = false
 	local inside = false
+	local from = 0
+	local to = 0
 	local function flush()
 		local t = table.concat(cur)
 		if quoted then
 			t = t:match("^%s*(.-)%s*$") or ""
 		end
 		if t ~= "" then
-			table.insert(out, { text = t, quoted = quoted })
+			table.insert(out, { text = t, quoted = quoted, from = from, to = to })
 		end
 		cur = {}
 		quoted = false
+		from = 0
 	end
 	for i = 1, #text do
 		local ch = text:sub(i, i)
 		if ch == '"' then
 			inside = not inside
 			quoted = true
+			if from == 0 then
+				from = i
+			end
+			to = i
 		elseif not inside and ch:match("%s") then
 			flush()
 		else
 			table.insert(cur, ch)
+			if from == 0 then
+				from = i
+			end
+			to = i
 		end
 	end
 	flush()
@@ -77,36 +91,47 @@ local function tokens(text: string): { { text: string, quoted: boolean } }
 end
 
 function query.parse(text: string): Parsed
-	local p: Parsed = { words = {}, repo = {}, model = {}, errors = {} }
+	local p: Parsed = { words = {}, repo = {}, model = {}, errors = {}, tokens = {} }
 	for _, tok in tokens(text) do
 		local t = tok.text
 		local lower = t:lower()
+		local function mark(kind: "filter" | "invalid")
+			table.insert(p.tokens, { from = tok.from, to = tok.to, kind = kind })
+		end
 		if tok.quoted then
 			table.insert(p.words, t)
 		elseif lower:sub(1, 5) == "repo:" and #t > 5 then
+			mark("filter")
 			table.insert(p.repo, t:sub(6))
 		elseif lower:sub(1, 6) == "model:" and #t > 6 then
+			mark("filter")
 			table.insert(p.model, t:sub(7))
 		elseif lower:sub(1, 6) == "after:" or lower:sub(1, 7) == "before:" then
 			local key, value = lower:match("^(%a+):(.*)$")
 			if value ~= nil and value:match("^%d%d%d%d%-%d%d%-%d%d$") then
+				mark("filter")
 				if key == "after" then
 					p.after = value
 				else
 					p.before = value
 				end
 			else
-				table.insert(p.errors, tostring(key) .. ": needs a date like 2026-10-01")
+				mark("invalid")
+				table.insert(p.errors, "Ignored “" .. t .. "”: needs a date like 2026-10-01")
 			end
 		elseif lower:match("^cost[<>]") then
 			local op, n = lower:match("^cost([<>])%$?(%d+%.?%d*)$")
 			local value = n and tonumber(n)
 			if value == nil then
-				table.insert(p.errors, "cost: needs a number like cost>5")
-			elseif op == ">" then
-				p.cost_min = value
+				mark("invalid")
+				table.insert(p.errors, "Ignored “" .. t .. "”: needs a number like cost>5")
 			else
-				p.cost_max = value
+				mark("filter")
+				if op == ">" then
+					p.cost_min = value
+				else
+					p.cost_max = value
+				end
 			end
 		else
 			table.insert(p.words, t)

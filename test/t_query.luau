@@ -9,6 +9,14 @@ local function list(t: { string }): string
 	return table.concat(out, " ")
 end
 
+local function ranges(p: query.Parsed): string
+	local out = {}
+	for _, t in p.tokens do
+		table.insert(out, "[" .. t.from .. "-" .. t.to .. " " .. t.kind .. "]")
+	end
+	return table.concat(out, " ")
+end
+
 local function show(text: string)
 	local p = query.parse(text)
 	print("> " .. text)
@@ -16,6 +24,7 @@ local function show(text: string)
 	print("  repo: " .. list(p.repo) .. "  model: " .. list(p.model))
 	print("  after: " .. tostring(p.after) .. "  before: " .. tostring(p.before) .. "  cost: " .. tostring(p.cost_min) .. ".." .. tostring(p.cost_max))
 	print("  errors: " .. list(p.errors))
+	print("  tokens: " .. ranges(p))
 	print("  fts: " .. tostring(query.fts(p.words)))
 end
 
@@ -34,6 +43,8 @@ print("no -bail: " .. tostring(sql:find("-bail", 1, true) == nil))
 print("detail bad id: " .. tostring(query.detail_sql("zz", true)))
 print("detail injection: " .. tostring(query.detail_sql("aaaaaaaa-0000-4000-8000-00000000000'", true)))
 
+-- ui.luau pulls in lib/cards.luau, which reads tern.ui at load; U.mark itself needs nothing from Tern.
+tern = { ui = {} }
 local U = require("./ui")
 print("mark: " .. U.mark("Deploy docs; next deploy.", { "deploy" }))
 print("mark none: " .. U.mark("nothing here", { "deploy" }))

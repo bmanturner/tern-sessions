@@ -1,19 +1,29 @@
 --!strict
 -- lib/app.luau : the live manager blocks of this host. Their pane ids are published in kv key
--- `managers` so the window half can focus one instead of opening another.
+-- `managers` (with each one's mode) so the window half can focus one instead of opening another.
 
 local app = {}
 
 local states: { any } = {}
 
 function app.publish()
-	local ids: { string } = {}
+	local list: { { id: string, mode: string } } = {}
 	for _, s in states do
-		table.insert(ids, s.pane_id)
+		table.insert(list, { id = s.pane_id, mode = s.mode })
 	end
 	pcall(function()
-		tern.kv.set("managers", tern.json.array(ids))
+		tern.kv.set("managers", tern.json.array(list))
 	end)
+end
+
+-- Records a manager's mode ("search" | "spend" | "detail") and republishes.
+function app.set_mode(pane_id: string, mode: string)
+	for _, s in states do
+		if s.pane_id == pane_id then
+			s.mode = mode
+		end
+	end
+	app.publish()
 end
 
 function app.add(state: any)

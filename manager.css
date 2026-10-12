@@ -1,9 +1,19 @@
-/* Agent Sessions manager: the 14-day spend bars (Spend view). */
+/* Agent Sessions manager: the 14-day spend bars (Spend view) and the dock's hidden focus input. */
+/* The keyboard owner in spend and detail modes: invisible but focusable (not display:none). */
+.sf-dock[data-surface='plugin.tern-sessions.manager'] [data-id='dock.keys'] {
+	position: absolute;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	clip-path: inset(50%);
+	opacity: 0;
+	pointer-events: none;
+}
 .sf-main[data-surface='plugin.tern-sessions.manager'] .tsn-bars {
 	display: flex;
 	flex-direction: row;
 	align-items: flex-end;
-	gap: 3px;
+	gap: 4px;
 	/* The main region is a flex column that shrinks its children; keep the track its full height. */
 	flex: 0 0 56px;
 	height: 56px;
@@ -13,13 +23,20 @@
 }
 .sf-main[data-surface='plugin.tern-sessions.manager'] .tsn-bar {
 	flex: 1 1 0;
-	max-width: 40px;
+	min-width: 0;
 	min-height: 2px;
 	border-radius: 2px 2px 0 0;
-	background: var(--sf-ok, var(--ok));
+	background: rgb(from var(--sf-accent, var(--accent)) r g b / 45%);
 }
 .sf-main[data-surface='plugin.tern-sessions.manager'] .tsn-bar[data-o='today'] {
 	background: var(--sf-accent, var(--accent));
+}
+.sf-main[data-surface='plugin.tern-sessions.manager'] .tsn-bar[data-o='zero'] {
+	background: var(--t3);
+	opacity: 0.5;
+}
+.sf-main[data-surface='plugin.tern-sessions.manager'] .tsn-bar[data-o='over'] {
+	background: var(--sf-warn, var(--warn));
 }
 .sf-main[data-surface='plugin.tern-sessions.manager'] .tsn-bar[data-h='0'] {
 	height: 2px;
@@ -83,16 +100,4 @@
 }
 .sf-main[data-surface='plugin.tern-sessions.manager'] .tsn-bar[data-h='20'] {
 	height: 100%;
-}
-
-/* Spend view: the project and model breakdowns side by side. */
-.sf-main[data-surface='plugin.tern-sessions.manager'] .tsn-split {
-	display: flex;
-	flex-direction: row;
-	gap: 24px;
-	flex: none;
-}
-.sf-main[data-surface='plugin.tern-sessions.manager'] .tsn-split > * {
-	flex: 1 1 0;
-	min-width: 0;
 }

@@ -30,19 +30,20 @@ end
 
 D.clip = clip
 
--- Resumes or forks `sess` in a new tab; toasts the outcome.
 function D.launch(state: State, sess: any, how: "resume" | "fork")
-	if type(sess) ~= "table" or str(sess.id) == nil then
+	if state.launching or type(sess) ~= "table" or str(sess.id) == nil then
 		return
 	end
 	local title = str(sess.title) or "the session"
+	state.launching = true
 	state.notice = (if how == "fork" then "Forking " else "Resuming ") .. clip(title, 60) .. "…"
 	opener.open({ id = sess.id, file = str(sess.file), cwd = str(sess.cwd), title = title }, how, function(ok, note)
+		state.launching = false
+		state.notice = nil
 		if ok then
-			state.notice = nil
-			U.toast(state, "success", (if how == "fork" then "Forked " else "Opened ") .. clip(title, 60), note)
+			U.toast(state, "success", (if how == "fork" then "Forked " else "Resumed ") .. clip(title, 60), note)
 		else
-			state.notice = note
+			U.toast(state, "error", "Couldn't open the session", note)
 		end
 		U.render(state)
 	end)
@@ -55,20 +56,25 @@ function D.open(state: State, id: string, back: "search" | "spend")
 	state.detail = nil
 	state.detail_err = nil
 	state.notice = nil
+	state.prompt_sel = 1
+	U.focus_later(state.cx, U.KEYS_ID)
 	local sql = query.detail_sql(id, db.has_stats())
 	if sql == nil then
-		state.detail_err = "Session not found."
+		state.detail = false
 		return
 	end
 	db.run(sql, function(v, err)
 		if state.detail_id ~= id then
 			return
 		end
-		if type(v) == "table" then
+		if err ~= nil then
+			state.detail_err = err
+		elseif type(v) == "table" then
 			state.detail = v
 		else
-			state.detail_err = err or "Session not found."
+			state.detail = false
 		end
+		U.refocus(state)
 		U.render(state)
 	end)
 end
@@ -76,9 +82,7 @@ end
 function D.back(state: State)
 	state.mode = state.back
 	state.notice = nil
-	if state.mode == "search" then
-		U.focus(state.cx, "main.query")
-	end
+	U.focus_later(state.cx, if state.mode == "search" then "main.query" else U.KEYS_ID)
 end
 
 function D.title(state: State): string?
@@ -90,17 +94,38 @@ local function kv(label: string, value: string): { Spans }
 	return { { tern.ui.span(label, "muted") }, { tern.ui.span(value) } }
 end
 
-local function cost_row(d: any): string
-	local total = num(d.cost)
-	if total == nil then
-		return "no spend data"
+-- First model plus "+N" for the rest.
+local function models_text(models: string): string
+	local list: { string } = {}
+	for m in models:gmatch("[^,]+") do
+		table.insert(list, m)
 	end
-	local out = U.cost_text(total)
-	local n = num(d.subagents) or 0
-	if n > 0 then
-		out ..= string.format(" (incl. %s in %d subagent%s)", U.cost_text(num(d.cost_sub) or 0), n, if n == 1 then "" else "s")
+	if #list == 0 then
+		return models
 	end
-	return out .. " · API-equivalent estimate"
+	return if #list > 1 then string.format("%s +%d", list[1], #list - 1) else list[1]
+end
+
+local function summary(d: any): string
+	local parts: { string } = {}
+	if num(d.cost) then
+		table.insert(parts, U.cost_text(d.cost))
+	end
+	if num(d.requests) then
+		table.insert(parts, string.format("%d request%s", d.requests, if d.requests == 1 then "" else "s"))
+	end
+	if num(d.started) and num(d.ended) then
+		table.insert(parts, U.duration_text(d.ended - d.started))
+	end
+	if str(d.models) then
+		table.insert(parts, models_text(d.models))
+	end
+	return table.concat(parts, " · ")
+end
+
+local function prompt_count(state: State): number
+	local d: any = state.detail
+	return if type(d) == "table" and type(d.prompts) == "table" then #d.prompts else 0
 end
 
 function D.view(state: State): (Node, Node)
@@ -111,17 +136,26 @@ function D.view(state: State): (Node, Node)
 	local title = D.title(state) or "Session"
 	table.insert(
 		children,
-		U.text({ ui.span("Agent Sessions", "muted"), ui.span(" › ", "muted"), ui.span(clip(title, 90), "strong") }, "crumb")
+		ui.node("row", { key = "crumb", gap = "xs" }, {
+			U.with(ui.text({ ui.span("Agent Sessions", "muted") }), { key = "crumb-home", actions = { click = "back" }, title = "Back" }),
+			U.text({ ui.span("›", "muted") }, "crumb-sep"),
+			U.text({ ui.span(clip(title, 90), "strong") }, "crumb-title"),
+		})
 	)
 	if state.detail_err ~= nil then
-		table.insert(children, cards.error("Couldn't load this session", state.detail_err :: string))
+		table.insert(children, U.error_card(state.detail_err :: any, nil))
+	elseif d == false then
+		table.insert(children, cards.error("Session not found", "It may have been deleted."))
 	elseif type(d) ~= "table" then
 		table.insert(children, cards.loading("Loading the session…"))
 	else
-		table.insert(children, U.text({ ui.span(tostring(d.id), "muted") }, "id"))
+		local line = summary(d)
+		if line ~= "" then
+			table.insert(children, U.text({ ui.span(line, "strong") }, "summary"))
+		end
 		local started, ended = num(d.started), num(d.ended)
 		local rows: { { Spans } } = {
-			kv("Folder", str(d.cwd) and U.tilde(d.cwd) or "unknown"),
+			kv("Folder", if str(d.cwd) then U.tilde(d.cwd) else "unknown"),
 		}
 		if started then
 			table.insert(rows, kv("Started", U.abs(started)))
@@ -129,25 +163,23 @@ function D.view(state: State): (Node, Node)
 		if ended then
 			table.insert(rows, kv("Ended", U.abs(ended)))
 		end
-		if started and ended then
-			table.insert(rows, kv("Duration", U.duration_text(ended - started)))
-		end
-		if num(d.requests) then
-			table.insert(rows, kv("Requests", tostring(d.requests)))
+		local n = num(d.subagents) or 0
+		if num(d.cost) and n > 0 then
+			table.insert(
+				rows,
+				kv("Cost", string.format("%s (incl. %s in %d subagent%s)", U.cost_text(d.cost), U.cost_text(num(d.cost_sub) or 0), n, if n == 1 then "" else "s"))
+			)
 		end
 		if num(d.tool_calls) then
 			table.insert(rows, kv("Tool calls", tostring(d.tool_calls)))
 		end
-		if str(d.models) then
-			table.insert(rows, kv("Models", ((d.models :: string):gsub(",", ", "))))
-		end
-		table.insert(rows, kv("Cost", cost_row(d)))
-		table.insert(rows, kv("File", if str(d.file) then U.tilde(d.file) else "not found; resume uses the id"))
+		table.insert(rows, kv("Session", tostring(d.id)))
+		table.insert(rows, kv("File", if str(d.file) then U.tilde(d.file) else "Missing (resume looks it up by id)"))
 		table.insert(children, U.with(ui.kv(rows), { key = "facts" }))
 
 		local recaps: { any } = if type(d.recaps) == "table" then d.recaps else {}
 		if #recaps > 0 then
-			table.insert(children, U.text({ ui.span("RECAPS", "dim") }, "h-recaps"))
+			table.insert(children, U.with(ui.rule({ ui.span(if #recaps == 1 then "RECAP" else "RECAPS", "dim") }), { key = "h-recaps" }))
 			for i, r in recaps do
 				local t = num(r.t)
 				table.insert(
@@ -163,7 +195,7 @@ function D.view(state: State): (Node, Node)
 		if #prompts > 0 then
 			local count = num(d.prompt_count) or #prompts
 			local head = if count > #prompts then string.format("PROMPTS (first %d of %d)", #prompts, count) else string.format("PROMPTS (%d)", count)
-			table.insert(children, U.text({ ui.span(head, "dim") }, "h-prompts"))
+			table.insert(children, U.with(ui.rule({ ui.span(head, "dim") }), { key = "h-prompts" }))
 			local items: { Node } = {}
 			for i, p in prompts do
 				local t = num(p.t)
@@ -171,64 +203,69 @@ function D.view(state: State): (Node, Node)
 					items,
 					ui.node("item", {
 						key = tostring(i),
-						label = { ui.span(clip(tostring(p.text or ""), 200)) },
+						label = { ui.span(clip(tostring(p.text or ""), 300)) },
 						value = { ui.span(if t then U.when_text(t, now) else "", "muted") },
+						actions = { click = "copy" },
 					})
 				)
 			end
-			table.insert(children, ui.node("list", { key = "prompts" }, items))
+			table.insert(
+				children,
+				ui.node("list", {
+					key = "prompts",
+					selected = "main.prompts." .. math.clamp(state.prompt_sel, 1, #prompts),
+					max = 0.45,
+				}, items)
+			)
 		end
 	end
 
-	local dock: { Node } = {}
-	if state.notice then
-		table.insert(dock, U.text({ ui.span(state.notice :: string, "muted") }, "notice"))
-	end
-	table.insert(
-		dock,
-		U.with(ui.row({
-			U.badge("Resume r", "accent", "resume", "b-resume"),
-			U.badge("Fork f", "neutral", "fork", "b-fork"),
-			U.badge("Copy id y", "neutral", "copy", "b-copy"),
-			U.badge("Back esc", "neutral", "back", "b-back"),
-		}), { key = "acts" })
-	)
-	return ui.col(children), ui.col(dock)
-end
-
-function D.copy(state: State)
-	local id = state.detail_id
-	if id == nil then
-		return
-	end
-	pcall(function()
-		state.cx:copy(id)
-	end)
-	state.notice = "Copied the session id."
+	local dock = U.dock(state, {
+		notice = state.notice,
+		actions = {
+			{ label = "Resume", key = "enter", act = "resume", primary = true },
+			{ label = "Fork", key = "f", act = "fork" },
+			{ label = "Copy id", key = "y", act = "copy" },
+			{ label = "Back", key = "escape", act = "back" },
+		},
+	})
+	return ui.col(children), dock
 end
 
 function D.act(state: State, act: string): boolean
 	local d: any = state.detail
-	if act == "resume" or act == "fork" then
-		if type(d) == "table" then
-			D.launch(state, d, act :: any)
-		end
-	elseif act == "copy" then
-		D.copy(state)
-	elseif act == "back" then
+	if act == "back" then
 		D.back(state)
+		return true
+	end
+	if type(d) ~= "table" or state.launching then
+		return false
+	end
+	if act == "resume" or act == "fork" then
+		D.launch(state, d, act :: any)
+	elseif act == "copy" then
+		local id = state.detail_id
+		if id == nil then
+			return false
+		end
+		pcall(function()
+			state.cx:copy(id)
+		end)
+		U.toast(state, "success", "Copied session id")
 	else
 		return false
 	end
 	return true
 end
 
+local PAGE = 8
+
 function D.key(state: State, k: Key): boolean
 	if k.ctrl or k.meta or k.alt then
 		return false
 	end
 	local name = k.name
-	if name == "r" then
+	if name == "enter" or name == "r" then
 		return D.act(state, "resume")
 	elseif name == "f" then
 		return D.act(state, "fork")
@@ -237,7 +274,30 @@ function D.key(state: State, k: Key): boolean
 	elseif name == "escape" or name == "backspace" then
 		return D.act(state, "back")
 	end
-	return false
+	local n = prompt_count(state)
+	local to: number? = nil
+	if name == "up" then
+		to = state.prompt_sel - 1
+	elseif name == "down" then
+		to = state.prompt_sel + 1
+	elseif name == "page_up" then
+		to = state.prompt_sel - PAGE
+	elseif name == "page_down" then
+		to = state.prompt_sel + PAGE
+	elseif name == "home" then
+		to = 1
+	elseif name == "end" then
+		to = n
+	end
+	if to == nil or n == 0 then
+		return false
+	end
+	to = math.clamp(to, 1, n)
+	if to == state.prompt_sel then
+		return false
+	end
+	state.prompt_sel = to
+	return true
 end
 
 return D

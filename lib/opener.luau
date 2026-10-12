@@ -28,6 +28,17 @@ local function tilde(path: string): string
 	return path
 end
 
+-- The first stderr line, trimmed, at most 160 bytes, cut at a word boundary.
+local function first_line(text: string): string
+	local line = ((text:match("[^\n]*") or ""):gsub("^%s+", "")):gsub("%s+$", "")
+	if #line <= 160 then
+		return line
+	end
+	local cut = line:sub(1, 160)
+	local word = cut:match("^(.*)%s%S*$")
+	return ((word or cut):gsub("%s+$", ""))
+end
+
 local function run(argv: { string }, timeout: number, cb: (ProcessResult?) -> ())
 	local ok = pcall(function()
 		tern.process.run(argv, { timeout_ms = timeout }, function(r)
@@ -72,7 +83,8 @@ end
 function opener.open(sess: Target, how: "resume" | "fork", cb: (boolean, string?) -> ())
 	bins.resolve(function(b, err)
 		if b == nil then
-			return cb(false, if err == "tern_missing" then "Couldn't find tern." else "Couldn't find omp.")
+			local name = if err == "tern_missing" then "tern" else "omp"
+			return cb(false, "Couldn't find the " .. name .. " command. Is it installed and on your PATH?")
 		end
 		local target = if exists(sess.file) then sess.file :: string else sess.id
 		pick_cwd(sess, function(cwd, note)
@@ -91,12 +103,13 @@ function opener.open(sess: Target, how: "resume" | "fork", cb: (boolean, string?
 					end
 					local text = if r ~= nil then tostring(r.stderr) else "tern couldn't start."
 					if not retried and text:find("there is no session", 1, true) then
-						return launch({ b.tern, "new", "session", "Agent sessions", "--json", "--cwd", cwd, "--" }, true)
+						return launch({ b.tern, "new", "session", "Agent Sessions", "--json", "--cwd", cwd, "--" }, true)
 					end
 					if r == nil then
 						bins.invalidate()
 					end
-					cb(false, "Couldn't open it: " .. text:sub(1, 160))
+					tern.log.warn("tern-sessions: opening a session failed", text)
+					cb(false, "Couldn't open the session: " .. first_line(text))
 				end)
 			end
 			launch({ b.tern, "new", "tab", "--json", "--cwd", cwd, "--" }, false)

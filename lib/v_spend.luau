@@ -3,7 +3,6 @@
 -- models and sessions of the last 30 days, and the daily budget (edited in an overlay).
 local U = require("./ui")
 local D = require("./v_detail")
-local S = require("./v_search")
 local budget = require("./budget")
 local cards = require("./cards")
 local db = require("./db")
@@ -30,8 +29,21 @@ local function money(n: any): string
 	return string.format("$%.2f", num(n) or 0)
 end
 
+
+local NO_STATS = {
+	kind = "no_stats",
+	message = "omp records costs once you've run omp stats.",
+}
+
 function P.load(state: State, force: boolean)
 	if state.spend_loading then
+		return
+	end
+	if not db.has_history() then
+		local paths = db.paths()
+		state.spend = nil
+		state.spend_err = { kind = "no_history", message = "Run omp once and your sessions will appear here.", detail = paths.history }
+		U.render(state)
 		return
 	end
 	state.spend_loading = true
@@ -40,13 +52,14 @@ function P.load(state: State, force: boolean)
 		if not db.has_stats() then
 			state.spend_loading = false
 			state.spend = nil
-			state.spend_err = "No spend data yet. omp records it in ~/.omp/stats.db; run omp stats once in a terminal, then press R."
+			state.spend_err = NO_STATS
+			U.refocus(state)
 			U.render(state)
 			return
 		end
 		db.run(query.spend_sql(), function(v, err)
 			state.spend_loading = false
-			if type(v) == "table" then
+			if err == nil and type(v) == "table" then
 				state.spend = v
 				state.spend_err = nil
 				state.spend_at = tern.now()
@@ -54,8 +67,13 @@ function P.load(state: State, force: boolean)
 					state.today = v.today
 				end
 			else
-				state.spend_err = err or "No spend data."
+				local e: any = err or { kind = "failed", message = "Couldn't read omp's database." }
+				state.spend_err = e
+				if state.spend ~= nil then
+					U.toast(state, "error", "Couldn't refresh spend", e.message)
+				end
 			end
+			U.refocus(state)
 			U.render(state)
 		end)
 	end)
@@ -83,7 +101,7 @@ local function day_label(d: string): string
 	return (os.date("%a %d %b", t) :: string)
 end
 
-local function bars(days: { any }): { Node }
+local function bars(days: { any }, limit: number): { Node }
 	local ui = tern.ui
 	local maxc, total = 0, 0
 	for _, d in days do
@@ -95,100 +113,143 @@ local function bars(days: { any }): { Node }
 	for i, d in days do
 		local c = num(d.c) or 0
 		local bucket = if maxc > 0 then math.floor(20 * c / maxc + 0.5) else 0
+		local outcome = if c == 0 then "zero" elseif limit > 0 and c > limit then "over" elseif i == #days then "today" else "day"
 		table.insert(
 			out,
 			ui.el("div", {
 				key = "d" .. i,
 				class = "tsn-bar",
 				title = day_label(tostring(d.d)) .. " · " .. money(c),
-				attrs = { ["data-h"] = bucket, ["data-o"] = if i == #days then "today" else "ok" },
+				attrs = { ["data-h"] = bucket, ["data-o"] = outcome, ["aria-hidden"] = "true" },
 			})
 		)
 	end
-	return {
-		ui.el("div", { key = "bars", class = "tsn-bars" }, out),
-		U.text({ ui.span(string.format("%d days · %s · avg %s/day", #days, money(total), money(if #days > 0 then total / #days else 0)), "muted") }, "bars-sum"),
+	local nodes: { Node } = {
+		ui.el("div", { key = "bars", class = "tsn-bars", attrs = { role = "img", ["aria-label"] = "Daily spend, last 14 days" } }, out),
 	}
+	if #days > 0 then
+		table.insert(
+			nodes,
+			ui.node("row", { key = "bars-axis", justify = "between" }, {
+				U.text({ ui.span(day_label(tostring(days[1].d)), "muted") }, "axis-first"),
+				U.text({ ui.span("Today", "muted") }, "axis-last"),
+			})
+		)
+	end
+	table.insert(
+		nodes,
+		U.text({ ui.span(string.format("%d days · %s · avg %s/day", #days, money(total), money(if #days > 0 then total / #days else 0)), "muted") }, "bars-sum")
+	)
+	return nodes
 end
 
--- A titled list of `{c = cost}` rows, as one keyed column.
-local function money_list(key: string, head: string, rows: { any }, label: (any) -> string): Node
+-- One breakdown column: a labelled rule over a table of name, cost and share of the 30-day total.
+local function breakdown(key: string, head: string, rows: { any }, total30: number, name: (any) -> string): Node
 	local ui = tern.ui
-	local items: { Node } = {}
+	local trows: { any } = {}
 	for i, r in rows do
-		table.insert(
-			items,
-			ui.node("item", {
-				key = tostring(i),
-				label = { ui.span(label(r)) },
-				value = { ui.span(money(r.c)) },
-			})
-		)
+		local c = num(r.c) or 0
+		table.insert(trows, {
+			id = tostring(i),
+			cells = {
+				name = name(r),
+				cost = money(c),
+				share = { meter = { value = if total30 > 0 then c / total30 else 0, title = string.format("%d%% of 30 days", math.floor(100 * (if total30 > 0 then c / total30 else 0) + 0.5)) } },
+			},
+		})
 	end
-	return U.with(ui.col({ U.text({ ui.span(head, "dim") }, "head"), ui.node("list", { key = "rows" }, items) }), { key = key })
+	return ui.node("col", { key = key, grow = 1, basis = 0.45, min = { w = "36ch" } }, {
+		U.with(ui.rule({ ui.span(head, "dim") }), { key = "rule" }),
+		ui.node("table", {
+			key = "tbl",
+			cols = {
+				{ id = "name", grow = 1, truncate = "middle", priority = 3 } :: any,
+				{ id = "cost", align = "end", priority = 2 },
+				{ id = "share", priority = 1 },
+			},
+			rows = trows,
+		}),
+	})
+end
+
+local function today_of(state: State): number
+	local s: any = state.spend
+	return num(state.today) or (if type(s) == "table" then num(s.today) else nil) or 0
 end
 
 function P.view(state: State): (Node, Node, Node?)
 	local ui = tern.ui
 	local now = os.time()
 	local limit = settings.get().daily_budget
-	local status = if state.spend_loading then "updating…" else ""
-	local children: { Node } = { S.header(state, status) }
+	local children: { Node } = { U.header(state, { busy = if state.spend_loading then "Updating…" else nil }) }
 	local s: any = state.spend
-	if state.spend_err ~= nil and s == nil then
-		table.insert(children, cards.error("No spend to show", state.spend_err :: string, { retry = "refresh" }))
-	elseif type(s) ~= "table" then
-		table.insert(children, cards.loading("Adding up spend…"))
-	else
-		local line = string.format("Today %s · This week %s · This month %s", money(s.today), money(s.week), money(s.month))
-		if limit > 0 then
-			line ..= " · Budget " .. money(limit) .. "/day"
+	local err: any = state.spend_err
+	if err ~= nil and s == nil then
+		if err.kind == "no_stats" then
+			table.insert(children, cards.with(cards.error("No spend data yet", err.message, { fixes = { "omp stats" }, retry = "refresh" }), { key = "err" }))
+		else
+			table.insert(children, U.error_card(err, "refresh"))
 		end
-		table.insert(children, U.text({ ui.span(line, "strong") }, "totals"))
+	elseif type(s) ~= "table" then
+		table.insert(children, cards.with(cards.loading("Loading spend…"), { key = "loading" }))
+	else
+		local today = today_of(state)
+		local today_token = if limit > 0 and today >= limit then "strong error" elseif limit > 0 and today >= 0.8 * limit then "strong warning" else "strong"
+		table.insert(
+			children,
+			U.with(
+				ui.kv({
+					{ { ui.span("Today", "muted") }, { ui.span(money(today), today_token) } },
+					{ { ui.span("This week", "muted") }, { ui.span(money(s.week)) } },
+					{ { ui.span("This month", "muted") }, { ui.span(money(s.month)) } },
+				}),
+				{ key = "totals", layout = "inline" }
+			)
+		)
 		if limit > 0 then
-			local today = num(s.today) or 0
 			table.insert(
 				children,
-				U.with(ui.meter(math.min(1, today / limit), { ui.span(string.format("%d%% of today's budget", math.floor(100 * today / limit + 0.5)), "muted") }), {
+				U.with(ui.meter(today / limit, { ui.span(string.format("%s of %s today", money(today), money(limit)), "muted") }), {
 					key = "meter",
+					size = "md",
 					thresholds = { warn = 0.8, bad = 1 },
+					max = { w = "60ch" },
 				})
 			)
 		end
-		local note = "API-equivalent estimates from omp stats."
+		table.insert(children, U.text({ ui.span("Estimated API cost, from omp stats.", "muted") }, "note"))
 		if state.spend_note then
-			note ..= " " .. (state.spend_note :: string)
+			table.insert(children, U.text({ ui.span(state.spend_note :: string, "warning") }, "sync-note"))
 		end
-		table.insert(children, U.text({ ui.span(note, "muted") }, "note"))
+		if err ~= nil then
+			table.insert(children, U.text({ ui.span("Couldn't refresh: " .. tostring(err.message), "warning") }, "refresh-err"))
+		end
 
 		local days: { any } = if type(s.days) == "table" then s.days else {}
-		for _, n in bars(days) do
+		for _, n in bars(days, limit) do
 			table.insert(children, n)
 		end
 
 		local folders: { any } = if type(s.folders) == "table" then s.folders else {}
 		local models: { any } = if type(s.models) == "table" then s.models else {}
+		local total30 = num(s.total30) or 0
 		local cols: { Node } = {}
 		if #folders > 0 then
-			table.insert(cols, money_list("folders", "BY PROJECT (30 days)", folders, function(r)
+			table.insert(cols, breakdown("folders", "BY FOLDER · 30 DAYS", folders, total30, function(r)
 				return if str(r.cwd) then U.tilde(r.cwd) else tostring(r.f)
 			end))
 		end
 		if #models > 0 then
-			table.insert(cols, money_list("models", "BY MODEL (30 days)", models, function(r)
+			table.insert(cols, breakdown("models", "BY MODEL · 30 DAYS", models, total30, function(r)
 				return str(r.m) or "unknown"
 			end))
 		end
-		if #cols == 2 and U.tier(state.cx.cols) >= 3 then
-			table.insert(children, ui.el("div", { key = "split", class = "tsn-split" }, cols))
-		else
-			for _, c in cols do
-				table.insert(children, c)
-			end
+		if #cols > 0 then
+			table.insert(children, ui.node("row", { key = "breakdowns", gap = "lg", wrap = true, align = "start" }, cols))
 		end
 		local list = top(state)
 		if #list > 0 then
-			table.insert(children, U.text({ ui.span("TOP SESSIONS (30 days)", "dim") }, "h-top"))
+			table.insert(children, U.with(ui.rule({ ui.span("TOP SESSIONS · 30 DAYS", "dim") }), { key = "h-top" }))
 			local items: { Node } = {}
 			for _, r in list do
 				local parts: { string } = {}
@@ -202,30 +263,32 @@ function P.view(state: State): (Node, Node, Node?)
 					items,
 					ui.node("item", {
 						key = r.id,
-						label = { ui.span(D.clip(str(r.title) or "Untitled session", 80), "strong") },
+						label = { ui.span(D.clip(str(r.title) or "Untitled session", 80)) },
 						detail = { ui.span(table.concat(parts, " · "), "muted") },
-						value = { ui.span(U.cost_text(r.cost)) },
-						icon = "history",
+						value = { ui.span(U.cost_text(r.cost), "strong") },
 					})
 				)
 			end
 			local sel = list[state.spend_sel]
-			table.insert(children, ui.node("list", { key = "top", selected = if sel then U.item_id("top", sel.id) else nil }, items))
+			table.insert(
+				children,
+				ui.node("list", {
+					key = "top",
+					selected = if sel then U.item_id("top", sel.id) else nil,
+				}, items)
+			)
 		end
 	end
 
-	local dock: { Node } = {}
-	if state.notice then
-		table.insert(dock, U.text({ ui.span(state.notice :: string, "muted") }, "notice"))
-	end
-	table.insert(
-		dock,
-		U.with(ui.row({
-			U.badge(if limit > 0 then "Budget " .. money(limit) .. " b" else "Set budget b", "neutral", "budget", "b-budget"),
-			U.badge("Refresh ⇧R", "neutral", "refresh", "b-refresh"),
-		}), { key = "acts" })
-	)
-	table.insert(dock, U.hints({ { "⏎", "details" }, { "b", "budget" }, { "⇧R", "refresh" }, { "⇥", "search" } }))
+	local dock = U.dock(state, {
+		notice = state.notice,
+		actions = {
+			{ label = "Open", key = "enter", act = "open", primary = true, hidden = top(state)[state.spend_sel] == nil },
+			{ label = "Budget", key = "b", act = "budget", hidden = state.spend == nil },
+			{ label = "Refresh", key = "shift+r", act = "refresh" },
+			{ label = "Search", key = "tab", act = "tab_search" },
+		},
+	})
 
 	local layer: Node? = nil
 	local f = state.budget_edit
@@ -235,48 +298,76 @@ function P.view(state: State): (Node, Node, Node?)
 				key = "amount",
 				text = f.text,
 				cursor = textfield.utf16(f),
-				placeholder = "Dollars per day, 0 to turn off",
+				placeholder = "25",
 				prompt = { ui.span("$ ", "muted") },
+				aria = "Daily budget in dollars",
 			}),
 		}
 		if state.budget_err then
 			table.insert(body, U.text({ ui.span(state.budget_err :: string, "error") }, "err"))
 		end
-		table.insert(body, U.text({ ui.span("Over it, you get one notification a day.", "muted") }, "about"))
-		table.insert(body, U.hints({ { "⏎", "save" }, { "esc", "cancel" } }, "keys"))
-		layer = ui.col({ ui.node("overlay", { key = "budget", head = "Daily budget", size = "sm", modal = true }, body) })
+		table.insert(body, U.text({ ui.span("0 turns alerts off.", "muted") }, "helper"))
+		table.insert(body, U.text({ ui.span("You'll get one desktop notification the first time a day goes over this.") }, "about"))
+		if type(s) == "table" then
+			table.insert(body, U.text({ ui.span("Today so far " .. money(today_of(state)), "muted") }, "today"))
+		end
+		table.insert(
+			body,
+			ui.node("row", { key = "buttons", gap = "sm" }, {
+				U.badge("Save", "accent", "budget_save", "b-save"),
+				U.badge("Cancel", "neutral", "budget_cancel", "b-cancel"),
+			})
+		)
+		layer = ui.col({ ui.node("overlay", { key = "budget", head = "Daily budget", aria = "Daily budget", size = "sm", modal = true }, body) })
 	end
-	return ui.col(children), ui.col(dock), layer
+	return ui.col(children), dock, layer
 end
 
 function P.edit_budget(state: State)
 	local limit = settings.get().daily_budget
 	state.budget_edit = textfield.new(if limit > 0 then tostring(limit) else "")
 	state.budget_err = nil
-	U.focus(state.cx, "layer.budget.amount")
+	U.focus_later(state.cx, "layer.budget.amount")
+end
+
+local function close_budget(state: State)
+	state.budget_edit = nil
+	state.budget_err = nil
+	U.focus_later(state.cx, U.KEYS_ID)
+end
+
+local function save_budget(state: State)
+	local f = state.budget_edit
+	if f == nil then
+		return
+	end
+	local n = tonumber((f.text:gsub("[$,%s]", "")))
+	if f.text:match("^%s*$") then
+		n = 0
+	end
+	if n == nil or n < 0 or n ~= n or n == math.huge then
+		state.budget_err = "Enter an amount like 25, or 0 to turn it off."
+		return
+	end
+	settings.set({ daily_budget = n })
+	close_budget(state)
+	local over = n > 0 and type(state.spend) == "table" and today_of(state) >= n
+	U.toast(
+		state,
+		"success",
+		if n > 0 then "Daily budget set to " .. money(n) else "Budget alerts off",
+		if over then "Today is already over it, so you'll get one alert now." else nil
+	)
+	budget.check()
 end
 
 local function budget_key(state: State, k: Key): boolean
 	local f = state.budget_edit :: textfield.Field
 	if k.name == "escape" then
-		state.budget_edit = nil
-		state.budget_err = nil
-		U.focus(state.cx, nil)
+		close_budget(state)
 		return true
 	elseif k.name == "enter" then
-		local n = tonumber((f.text:gsub("[$,%s]", "")))
-		if f.text:match("^%s*$") then
-			n = 0
-		end
-		if n == nil or n < 0 or n ~= n or n == math.huge then
-			state.budget_err = "Enter an amount like 25, or 0 to turn it off."
-			return true
-		end
-		settings.set({ daily_budget = n })
-		state.budget_edit = nil
-		state.budget_err = nil
-		U.focus(state.cx, nil)
-		budget.check()
+		save_budget(state)
 		return true
 	end
 	if textfield.key(f, k, false) then
@@ -286,12 +377,14 @@ local function budget_key(state: State, k: Key): boolean
 	return false
 end
 
-function P.move(state: State, delta: number): boolean
-	local list = top(state)
-	if #list == 0 then
+local PAGE = 5
+
+local function move_to(state: State, to: number): boolean
+	local n = #top(state)
+	if n == 0 then
 		return false
 	end
-	local i = math.clamp(state.spend_sel + delta, 1, #list)
+	local i = math.clamp(to, 1, n)
 	if i == state.spend_sel then
 		return false
 	end
@@ -300,9 +393,24 @@ function P.move(state: State, delta: number): boolean
 end
 
 function P.act(state: State, act: string): boolean
-	if act == "budget" then
+	if act == "budget_save" then
+		if state.budget_edit == nil then
+			return false
+		end
+		save_budget(state)
+	elseif act == "budget_cancel" then
+		if state.budget_edit == nil then
+			return false
+		end
+		close_budget(state)
+	elseif state.budget_edit ~= nil then
+		return false
+	elseif act == "budget" then
 		P.edit_budget(state)
 	elseif act == "refresh" then
+		if state.spend_loading then
+			return false
+		end
 		P.load(state, true)
 	elseif act == "open" then
 		local sel = top(state)[state.spend_sel]
@@ -324,13 +432,21 @@ function P.key(state: State, k: Key): boolean
 	if k.ctrl or k.meta or k.alt then
 		return false
 	elseif name == "up" then
-		return P.move(state, -1)
+		return move_to(state, state.spend_sel - 1)
 	elseif name == "down" then
-		return P.move(state, 1)
+		return move_to(state, state.spend_sel + 1)
+	elseif name == "page_up" then
+		return move_to(state, state.spend_sel - PAGE)
+	elseif name == "page_down" then
+		return move_to(state, state.spend_sel + PAGE)
+	elseif name == "home" then
+		return move_to(state, 1)
+	elseif name == "end" then
+		return move_to(state, #top(state))
 	elseif name == "enter" then
 		return P.act(state, "open")
 	elseif name == "b" then
-		return P.act(state, "budget")
+		return state.spend ~= nil and P.act(state, "budget")
 	elseif name == "R" or (name == "r" and k.shift) then
 		return P.act(state, "refresh")
 	end

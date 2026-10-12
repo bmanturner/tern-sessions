@@ -3,36 +3,42 @@
   repo:   model: 
   after: nil  before: nil  cost: nil..nil
   errors: 
+  tokens: 
   fts: "deploy"* AND "auth"*
 > "exact phrase" repo:web model:opus
   words: [exact phrase]
   repo: [web]  model: [opus]
   after: nil  before: nil  cost: nil..nil
   errors: 
+  tokens: [16-23 filter] [25-34 filter]
   fts: "exact phrase"*
 > after:2026-10-01 before:bad cost>$5.5 cost<x
   words: 
   repo:   model: 
   after: 2026-10-01  before: nil  cost: 5.5..nil
-  errors: [before: needs a date like 2026-10-01] [cost: needs a number like cost>5]
+  errors: [Ignored “before:bad”: needs a date like 2026-10-01] [Ignored “cost<x”: needs a number like cost>5]
+  tokens: [1-16 filter] [18-27 invalid] [29-37 filter] [39-44 invalid]
   fts: nil
 > it's 100%_done
   words: [it's] [100%_done]
   repo:   model: 
   after: nil  before: nil  cost: nil..nil
   errors: 
+  tokens: 
   fts: "it's"* AND "100%_done"*
 > " OR *
   words: [OR *]
   repo:   model: 
   after: nil  before: nil  cost: nil..nil
   errors: 
+  tokens: 
   fts: "OR *"*
 > REPO:Api Model:GPT cost<12
   words: 
   repo: [Api]  model: [GPT]
   after: nil  before: nil  cost: nil..12
   errors: 
+  tokens: [1-8 filter] [10-18 filter] [20-26 filter]
   fts: nil
 quote doubled: true
 percent escaped: true
